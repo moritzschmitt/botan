@@ -29,20 +29,20 @@ inline auto create_aes_row_generator(const FrodoKEMConstants& constants, StrongS
       return aes;
    };
 
-   return [n = static_cast<uint16_t>(constants.n()), aes = setup_aes(seed_a)](std::span<uint8_t> out, uint16_t i) {
-      BufferStuffer out_bs(out);
+   return [n = static_cast<uint16_t>(constants.n()), aes = setup_aes(seed_a)](
+             std::span<uint8_t> out, uint16_t first_row, size_t nrows) {
+      BOTAN_DEBUG_ASSERT(out.size() == nrows * (n / (AES_128::BLOCK_SIZE / 2)) * AES_128::BLOCK_SIZE);
 
-      BOTAN_DEBUG_ASSERT(out_bs.remaining_capacity() % AES_128::BLOCK_SIZE == 0);
-
-      for(uint16_t j = 0; j < n; j += AES_128::BLOCK_SIZE / 2) {
-         // set up the to-be-encrypted 'b' value in the out variable
-         // for in-place encryption of the block cipher
-         // b = i || j || 0000...
-         out_bs.append(store_le(i, j));
-         clear_mem(out_bs.next<AES_128::BLOCK_SIZE - sizeof(i) - sizeof(j)>());
+      // Set up the to-be-encrypted 'b' values for in-place encryption:
+      // each block is le16(i) || le16(j) || 0000...
+      uint8_t* p = out.data();
+      for(size_t r = 0; r != nrows; ++r) {
+         const uint16_t i = static_cast<uint16_t>(first_row + r);
+         for(uint16_t j = 0; j < n; j += AES_128::BLOCK_SIZE / 2) {
+            store_le(p, i, j, uint16_t(0), uint16_t(0), uint16_t(0), uint16_t(0), uint16_t(0), uint16_t(0));
+            p += AES_128::BLOCK_SIZE;
+         }
       }
-
-      BOTAN_DEBUG_ASSERT(out_bs.full());
 
       aes.encrypt(out);
    };
