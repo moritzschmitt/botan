@@ -110,7 +110,7 @@ BigInt operator/(const BigInt& x, const BigInt& y) {
 
    BigInt q;
    BigInt r;
-   vartime_divide(x, y, q, r);
+   ct_divide(x, y, q, r);
    return q;
 }
 
@@ -148,7 +148,7 @@ BigInt operator%(const BigInt& n, const BigInt& mod) {
 
    BigInt q;
    BigInt r;
-   vartime_divide(n, mod, q, r);
+   ct_divide(n, mod, q, r);
    return r;
 }
 

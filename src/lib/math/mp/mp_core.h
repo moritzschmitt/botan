@@ -431,6 +431,26 @@ inline constexpr void bigint_linmul3(W z[], const W x[], size_t x_size, W y) {
 }
 
 /**
+* Compute z[0:N] = z[0:N] - q * y[0:N]
+*
+* Returns the borrow out, a full word value which the caller must
+* subtract from z[N]
+*/
+template <WordType W>
+inline constexpr auto bigint_submul(W z[], const W y[], size_t N, W q) -> W {
+   W mul_carry = 0;
+   W borrow = 0;
+
+   for(size_t i = 0; i != N; ++i) {
+      const W t = word_madd2(y[i], q, &mul_carry);
+      z[i] = word_sub(z[i], t, &borrow);
+   }
+
+   // Both mul_carry <= W_max - 1 and borrow <= 1, so this cannot overflow
+   return mul_carry + borrow;
+}
+
+/**
 * Compare x and y
 * Return -1 if x < y
 * Return 0 if x == y
@@ -630,6 +650,68 @@ constexpr W reciprocal_word(W D) {
 }
 
 /**
+* Compute the same reciprocal as reciprocal_word, but avoiding any
+* machine instructions with data dependent timing (viz. division),
+* so it can be used when the divisor is secret.
+*
+* Requires that D is normalized (ie with its top bit set)
+*/
+template <WordType W>
+constexpr W reciprocal_word_ct(W D) {
+   BOTAN_DEBUG_ASSERT((D & WordInfo<W>::top_bit) != 0);
+
+   // Bit serial long division of ((~D) || (2^b - 1)) / D, with all of the
+   // conditional logic of the reciprocal_word fallback computed via masks
+   W remainder = static_cast<W>(~D);
+   W quotient = 0;
+
+   for(size_t i = 0; i != WordInfo<W>::bits; ++i) {
+      const auto carry = CT::Mask<W>::expand_top_bit(remainder);
+      remainder = static_cast<W>((remainder << 1) | 1);
+      quotient <<= 1;
+
+      const auto sub = carry | CT::Mask<W>::is_gte(remainder, D);
+      remainder -= sub.if_set_return(D);
+      quotient |= sub.if_set_return(1);
+   }
+
+   return quotient;
+}
+
+/*
+* 2/1 division of (u1 || u0) by the normalized divisor D given its
+* reciprocal v, returning quotient and remainder. Requires u1 < D.
+*
+* Algorithm 4 of Möller and Granlund "Improved Division by Invariant
+* Integers", with the conditional corrections computed as masked updates.
+*
+* Runs in constant time with respect to u1 and u0.
+*/
+template <WordType W>
+constexpr std::pair<W, W> bigint_div2by1_preinv(W u1, W u0, W D, W v) {
+   // Steps 1-3: <q1,q0> = v*u1; <q1,q0> += <u1,u0>; q1 += 1
+   W q1 = u0;
+   const W q0 = word_madd2(u1, v, &q1);  // <q1,q0> = u1*v + u0
+   q1 += u1 + 1;
+
+   // Step 4
+   W r = u0 - q1 * D;
+
+   // Steps 5-7: If r >= q0 { q1 -= 1; r += d; }
+   const auto fix_down = CT::Mask<W>::is_gt(r, q0);
+   q1 -= fix_down.if_set_return(1);
+   r += fix_down.if_set_return(D);
+
+   // Steps 8-10: if r >= D { q1 += 1; r -= D; }
+   const auto fix_up = CT::Mask<W>::is_gte(r, D);
+   q1 += fix_up.if_set_return(1);
+   r -= fix_up.if_set_return(D);
+
+   // Step 11
+   return std::make_pair(q1, r);
+}
+
+/**
 * Setup for word level division/modulo operations
 *
 * The general case uses a reciprocal of the normalized divisor,
@@ -686,7 +768,7 @@ class divide_precomp final {
             }
          }();
 
-         const auto [q, rshift] = div2by1_preinv(u1, u0, m_norm_divisor, m_reciprocal);
+         const auto [q, rshift] = bigint_div2by1_preinv(u1, u0, m_norm_divisor, m_reciprocal);
          const W r = rshift >> m_shift;
          return std::make_pair(q, r);
       }
@@ -702,36 +784,6 @@ class divide_precomp final {
       inline constexpr W mod_2to1(W n1, W n0) const { return this->divmod_2to1(n1, n0).second; }
 
    private:
-      /*
-      * 2/1 division of (u1 || u0) by the normalized divisor D given its
-      * reciprocal v, returning quotient and remainder. Requires u1 < D.
-      *
-      * Algorithm 4 of Möller and Granlund, with the conditional
-      * corrections computed as masked updates.
-      */
-      static constexpr std::pair<W, W> div2by1_preinv(W u1, W u0, W D, W v) {
-         // Steps 1-3: <q1,q0> = v*u1; <q1,q0> += <u1,u0>; q1 += 1
-         W q1 = u0;
-         const W q0 = word_madd2(u1, v, &q1);  // <q1,q0> = u1*v + u0
-         q1 += u1 + 1;
-
-         // Step 4
-         W r = u0 - q1 * D;
-
-         // Steps 5-7: If r >= q0 { q1 -= 1; r += d; }
-         const auto fix_down = CT::Mask<W>::is_gt(r, q0);
-         q1 -= fix_down.if_set_return(1);
-         r += fix_down.if_set_return(D);
-
-         // Steps 8-10: if r >= D { q1 += 1; r -= D; }
-         const auto fix_up = CT::Mask<W>::is_gte(r, D);
-         q1 += fix_up.if_set_return(1);
-         r -= fix_up.if_set_return(D);
-
-         // Step 11
-         return std::make_pair(q1, r);
-      }
-
       /*
       * When the divisor is the maximum integer value, then a two word
       * division becomes simple.
